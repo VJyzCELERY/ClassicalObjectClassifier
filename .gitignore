@@ -1,2 +1,4 @@
 /dataset
 /trained_model
+*.pt
+app.py

@@ -10,8 +10,8 @@ import random
 import numpy as np
 import torch.nn as nn
 
-class RealWasteTrainer:
-    def __init__(self,model : Classifier,train_set : ImageDataset,val_set : ImageDataset = None, batch_size=32,lr = 1e-3,device='cpu'):
+class ModelTrainer:
+    def __init__(self,model : Classifier,train_set : ImageDataset,val_set : ImageDataset = None, batch_size=32,lr = 1e-3,device='cpu',return_fig=False):
         self.train_loader = DataLoader(train_set,batch_size,shuffle=True,collate_fn=collate_fn)
         self.device = device
         if val_set is not None:
@@ -23,31 +23,62 @@ class RealWasteTrainer:
         self.lr = lr
         self.optim = optim.Adam(model.parameters(),lr=lr)
         self.criterion = nn.CrossEntropyLoss()
+        self.return_fig=return_fig
     
     def visualize_batch(self, imgs, preds, labels, class_names=None, max_samples=4):
+        
+        first_image = imgs
         if isinstance(imgs, list):
             imgs = np.stack(imgs, axis=0)
-            imgs = torch.from_numpy(imgs).permute(0, 3, 1, 2).float()  # (B,H,W,C) -> (B,C,H,W)
+            imgs = torch.from_numpy(imgs).permute(0, 3, 1, 2).float()
 
-        imgs = imgs.cpu().numpy()
+        imgs_np = imgs.cpu().numpy()
         preds = preds.cpu().numpy()
         labels = labels.cpu().numpy()
 
-        # Choose random indices to visualize
-        batch_size = imgs.shape[0]
+        batch_size = imgs_np.shape[0]
         indices = random.sample(range(batch_size), min(max_samples, batch_size))
+        first_image = first_image[indices[0]]
+        fig_pred = plt.figure(figsize=(6 * len(indices), 5))
+        grid = fig_pred.add_gridspec(1, len(indices))
 
-        plt.figure(figsize=(16, 8))
-        for i, idx in enumerate(indices):
-            plt.subplot(1, len(indices), i + 1)
-            plt.imshow(imgs[idx].transpose(1, 2, 0))
-            title = f"P:{preds[idx]} | T:{labels[idx]}"
+        for col, idx in enumerate(indices):
+            ax = fig_pred.add_subplot(grid[0, col])
+            ax.imshow(imgs_np[idx].transpose(1, 2, 0))
+
             if class_names:
-                title = f"P:{class_names[preds[idx]]} | T:{class_names[labels[idx]]}"
-            plt.title(title)
-            plt.axis("off")
+                title = f"P: {class_names[preds[idx]]} | T: {class_names[labels[idx]]}"
+            else:
+                title = f"P: {preds[idx]} | T: {labels[idx]}"
 
-        plt.show()
+            ax.set_title(title)
+            ax.axis("off")
+
+        fig_pred.tight_layout()
+        raw_features = self.model.visualize_feature(first_image,show=False)
+        feature_figs = []
+
+        for f in raw_features:
+
+            if isinstance(f, plt.Figure):
+                feature_figs.append(f)
+                continue
+
+            if hasattr(f, "mode"):
+                f = np.array(f)
+
+            fig = plt.figure(figsize=(16, 16))
+            ax = fig.add_subplot(111)
+            ax.imshow(f)
+            ax.axis("off")
+            feature_figs.append(fig)
+
+        all_figs = [fig_pred] + feature_figs
+
+        if self.return_fig:
+            return all_figs
+        else:
+            return None
 
 
     def train_one_epoch(self):
@@ -86,13 +117,15 @@ class RealWasteTrainer:
             train_losses.append(train_loss)
             train_accuracies.append(train_acc)
             if self.val_loader is not None:
-                val_loss,val_acc=self.validate(epoch, visualize=(epoch % visualize_every == 0))
+                val_loss,val_acc,fig=self.validate(epoch, visualize=(epoch % visualize_every == 0))
                 val_losses.append(val_loss)
                 val_accuracies.append(val_acc)
                 print(f"Epoch {epoch} Train Loss: {train_loss:.4f} | Train Acc : {train_acc:.4f} | Val Loss : {val_loss:.4f} | Val Acc : {val_acc:.4f}")
+                yield train_loss,train_acc,val_loss,val_acc,fig
             else:
                 print(f"Epoch {epoch} Train Loss: {train_loss:.4f} | Train Acc : {train_acc:.4f}")
-        return train_losses,train_accuracies,val_losses,val_accuracies
+                yield train_loss,train_acc,None,None,None
+        yield train_losses,train_accuracies,val_losses,val_accuracies,None
 
     def validate(self,epoch, visualize=False):
         if self.val_loader is None:
@@ -108,7 +141,7 @@ class RealWasteTrainer:
         val_labels_display = None
 
         val_pbar = tqdm(self.val_loader, desc="Validation",leave=False)
-
+        fig = None
         with torch.no_grad():
             for imgs, labels in val_pbar:
                 labels = labels.to(self.device)
@@ -132,7 +165,7 @@ class RealWasteTrainer:
         acc = correct / total
 
         if visualize and val_imgs_display is not None:
-            self.visualize_batch(val_imgs_display, val_preds_display, val_labels_display, self.class_names)
+            fig = self.visualize_batch(val_imgs_display, val_preds_display, val_labels_display, self.class_names)
 
         self.model.train()
-        return avg_loss, acc
+        return avg_loss,acc,fig

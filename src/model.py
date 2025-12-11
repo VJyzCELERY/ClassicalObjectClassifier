@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from skimage.feature import hog,local_binary_pattern
 import matplotlib.pyplot as plt
 import os
+import io
+from PIL import Image
 
 @dataclass
 class Config:
@@ -15,6 +17,7 @@ class Config:
     conv_hidden_dim=3
     conv_kernel_size=3
     dropout=0.2
+    classical_downsample=1
     # HOG
     hog_orientations = 9
     hog_pixels_per_cell = (16, 16)
@@ -102,7 +105,7 @@ class CNNFeatureExtractor(nn.Module):
             out = self(x)
 
         return out
-    def visualize(self, input_image, max_channels=8):
+    def visualize(self, input_image, max_channels=8,show=True):
         self.eval()
         device = self.get_device()
 
@@ -114,6 +117,7 @@ class CNNFeatureExtractor(nn.Module):
             raise TypeError("input_image must be np.ndarray or torch.Tensor")
 
         conv_layers = [(name, module) for name, module in self.named_modules() if isinstance(module, nn.Conv2d)]
+        all_layer_images = []
 
         for name, layer in conv_layers:
             activations = []
@@ -122,25 +126,38 @@ class CNNFeatureExtractor(nn.Module):
                 activations.append(output.cpu().detach())
 
             handle = layer.register_forward_hook(hook_fn)
-            _ = self(x)  
+            _ = self(x)
             handle.remove()
 
-            act = activations[0][0]  
+            act = activations[0][0]
             num_channels = min(act.shape[0], max_channels)
 
-            plt.figure(figsize=(15, 3))
+            fig, axes = plt.subplots(1, num_channels, figsize=(15, 3))
+            if num_channels == 1:
+                axes = [axes]
+
             for i in range(num_channels):
-                plt.subplot(1, num_channels, i + 1)
-                plt.imshow(act[i], cmap='gray')
-                plt.axis('off')
-            plt.suptitle(f'Layer: {name}', fontsize=14)
-            plt.show()
+                axes[i].imshow(act[i], cmap='gray')
+                axes[i].axis('off')
+
+            fig.suptitle(f'Layer: {name}', fontsize=14)
+            if show:
+                plt.show()
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png')
+            buf.seek(0)
+            img = Image.open(buf).convert("RGB")
+            all_layer_images.append(np.array(img))
+            plt.close(fig) 
+        return all_layer_images
+    
 class ClassicalFeatureExtractor(nn.Module):
     def __init__(self, config : Config):
         super().__init__()
         self.img_size = config.img_size  # (H, W)
         self.hog_orientations = config.hog_orientations
-        self.num_downsample = config.conv_hidden_dim
+        self.num_downsample = config.classical_downsample
         self.config = config
         self.feature_names = ['HoG','Canny Edge','Harris Corner','Shi-Tomasi corners','LBP','Gabor Filters']
         self.device = 'cpu'
@@ -150,10 +167,6 @@ class ClassicalFeatureExtractor(nn.Module):
 
 
     def extract_features(self, img):
-        """
-        img: numpy array HxWxC in RGB, float32 0-1
-        Returns: 2D stacked numpy array of features (HxWxC)
-        """
         cfg = self.config
 
         # Convert to grayscale
@@ -237,32 +250,49 @@ class ClassicalFeatureExtractor(nn.Module):
         batch_features = np.stack(batch_features, axis=0)
         return torch.from_numpy(batch_features).float().to(self.get_device())
     
-    def visualize(self, img, show_original=True):
+    def visualize(self, img, show_original=True,show=True):
         if img.ndim != 3 or img.shape[2] != 3:
             img = np.repeat(img[:, :, None], 3, axis=2)
 
         feature_stack = self.extract_features(img)
         num_channels = feature_stack.shape[2]
-        ncols = num_channels + 1 if show_original else num_channels
 
-        plt.figure(figsize=(4 * ncols, 4))
-        col_idx = 1
+        outputs = []  
+
+        def fig_to_pil(fig):
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+            buf.seek(0)
+
+            pil_img = Image.open(buf).copy()
+
+            buf.close()
+            plt.close(fig)
+
+            return pil_img
 
         if show_original:
-            plt.subplot(1, ncols, col_idx)
+            fig = plt.figure(figsize=(4, 4))
             plt.imshow(img)
             plt.title("Original")
             plt.axis("off")
-            col_idx += 1
+            if show:
+                plt.show()                      
+            outputs.append(fig_to_pil(fig)) 
 
         for c in range(num_channels):
-            plt.subplot(1, ncols, col_idx)
-            plt.imshow(feature_stack[:, :, c], cmap='gray')
+            fig = plt.figure(figsize=(4, 4))
+
+            plt.imshow(feature_stack[:, :, c], cmap="gray")
             plt.title(f"Feature {self.feature_names[c]}")
             plt.axis("off")
-            col_idx += 1
+            if show:
+                plt.show()                      
+            outputs.append(fig_to_pil(fig)) 
 
-        plt.show()
+        return outputs
+
+
     def output(self):
         """Return dummy output to compute in_features for FC head"""
         dummy_img = np.zeros((1, self.img_size[1],self.img_size[0], 3), dtype=np.float32)
@@ -305,12 +335,28 @@ class Classifier(nn.Module):
     def get_device(self):
         return next(self.parameters()).device
     
+    @torch.no_grad()
+    def predict(self, x):
+        self.eval()
+        target_size = self.config.img_size
+        x = cv2.resize(x, target_size)
+        logits = self.forward(x)    
+        probs = torch.softmax(logits, dim=1)
+        pred_idx = torch.argmax(probs, dim=1).item()
+
+        return self.classes[pred_idx]
+
     def forward(self,x):
         feat = self.backbone(x)
         feat = self.flatten(feat)
         return self.head(feat)
-    def visualize_feature(self,img,**kwargs):
-        self.backbone.visualize(img,**kwargs)
+    def visualize_feature(self,img,return_img=True,**kwargs):
+        target_size = self.config.img_size
+        img = cv2.resize(img, target_size)
+        if return_img:
+            return self.backbone.visualize(img,**kwargs)
+        else:
+            self.backbone.visualize(img,**kwargs)
     def save(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({
@@ -322,7 +368,7 @@ class Classifier(nn.Module):
 
 @staticmethod
 def load(path: str, backbone_class, device='cpu'):
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device,weights_only=False)
     config = checkpoint['config']
     classes = checkpoint['classes']
     backbone = backbone_class(config).to(device)
