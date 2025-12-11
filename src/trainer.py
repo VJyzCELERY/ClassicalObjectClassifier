@@ -72,9 +72,14 @@ class ModelTrainer:
             ax.imshow(f)
             ax.axis("off")
             feature_figs.append(fig)
+            
 
         all_figs = [fig_pred] + feature_figs
-
+        plt.show(fig_pred)
+        plt.close(fig_pred)
+        for fig in feature_figs:
+            plt.show(fig)
+            plt.close(fig) 
         if self.return_fig:
             return all_figs
         else:
