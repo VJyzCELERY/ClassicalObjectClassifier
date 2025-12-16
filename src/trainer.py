@@ -77,8 +77,9 @@ class ModelTrainer:
         all_figs = [fig_pred] + feature_figs
         plt.show()
         plt.close(fig_pred)
-        for fig in feature_figs:
-            plt.show(fig)
+        for i,fig in enumerate(feature_figs):
+            plt.figure(fig)
+            plt.show()
             plt.close(fig) 
         if self.return_fig:
             return all_figs
