@@ -269,7 +269,7 @@ intro_html = """
     The reason is not because feature extraction has became obsolete in deep learning, instead the process itself has become part of the learning process. With deep learning, we use a model called Convolutional Neural Network (CNN).
     A convolutional network consist of two main layers, the convolution layer and the fully connected layer. The convolution layer apply filter on the image with a filter usually called convolutional kernel where the value of each cells in the convolutional kernel is random initially.
     </p>
-    <img src="https://viso.ai/wp-content/uploads/2024/04/convolution-illustration.jpg"></img>
+    <img src="https://raw.githubusercontent.com/VJyzCELERY/ClassicalObjectClassifier/refs/heads/main/assets/conv-illus.jpg"></img>
     <p>
     For more detail on how convolutional neural network work, you can refer to this <a href="https://viso.ai/deep-learning/convolution-operations/">link</a>.
     </p>

@@ -75,7 +75,7 @@ class ModelTrainer:
             
 
         all_figs = [fig_pred] + feature_figs
-        plt.show(fig_pred)
+        plt.show()
         plt.close(fig_pred)
         for fig in feature_figs:
             plt.show(fig)
