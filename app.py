@@ -2,7 +2,7 @@ import gradio as gr
 import zipfile
 import os
 import torch
-from src.dataloader import ImageDataset
+from src.dataloader import ImageDataset,collate_fn
 from src.model import Classifier,Config,CNNFeatureExtractor,ClassicalFeatureExtractor,load
 from torch.utils.data import Subset
 from src.trainer import ModelTrainer
@@ -15,7 +15,11 @@ from PIL import Image
 import io
 import matplotlib.pyplot as plt
 import shutil
+import pandas as pd
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import classification_report
+from torch.utils.data import DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def unzip_dataset(zip_file):
@@ -88,6 +92,7 @@ def train(cnn,classic,train_set,val_set,batch_size,lr,epochs,device="cpu",visual
     training_interrupt = False
     global cnn_history
     global classic_history
+    cnn_done=False
     cnn_history={
         "train_acc":[],
         "train_loss":[],
@@ -127,11 +132,13 @@ def train(cnn,classic,train_set,val_set,batch_size,lr,epochs,device="cpu",visual
             cnn_history['train_loss'].append(cnn_train_loss)
             cnn_history['val_acc'].append(cnn_val_acc)
             cnn_history['val_loss'].append(cnn_val_loss)
-            yield cnn_text,all_cnn_fig,classic_text,all_classic_fig
+            
+            yield cnn_text,all_cnn_fig,classic_text,all_classic_fig,cnn_done
+        cnn_done=True
         dt = time.time()-start_time
         cnn_fig=None
         cnn_text+=f'Time taken : {dt:.2f} seconds\n'
-        yield cnn_text,all_cnn_fig,classic_text,all_classic_fig
+        yield cnn_text,all_cnn_fig,classic_text,all_classic_fig,cnn_done
         start_time = time.time()
         for i,(classic_train_loss,classic_train_acc,classic_val_loss,classic_val_acc,classic_fig) in enumerate(classictrainer.train(epochs,visualize_every=visualize_every)):
             if training_interrupt:
@@ -147,21 +154,17 @@ def train(cnn,classic,train_set,val_set,batch_size,lr,epochs,device="cpu",visual
             classic_history['val_acc'].append(classic_val_acc)
             classic_history['val_loss'].append(classic_val_loss)
             classic_text+= f"Epochs {i+1} : Train Loss: {classic_train_loss:.4f}, Train Acc: {classic_train_acc:.4f}, Val Loss: {classic_val_loss:.4f}, Val Acc: {classic_val_acc:.4f}\n"
-            yield cnn_text,all_cnn_fig,classic_text,all_classic_fig
+            yield cnn_text,all_cnn_fig,classic_text,all_classic_fig,cnn_done
         dt = time.time()-start_time
         classic_fig=None
         classic_text+=f'Time taken : {dt:.2f} seconds\n'
-        yield cnn_text,all_cnn_fig,classic_text,all_classic_fig
-        print(cnn_history)
-        print(classic_history)
+        yield cnn_text,all_cnn_fig,classic_text,all_classic_fig,cnn_done
     except TrainingInterrupted as e:
         print(e)
         return
 
-    
-
 def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
-                img_width,img_height,fc_hidden_dim,
+                img_width,img_height,fc_num_layers,
                 in_channels,conv_hidden_dim,dropout,
                 classical_downsample,
                 hog_orientations,hog_pixels_per_cell,hog_cells_per_block,hog_block_norm,
@@ -180,7 +183,7 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
     EPOCHS = epochs
     LR = lr
     config.img_size = (int(img_width),int(img_height))
-    config.fc_hidden_dim = int(fc_hidden_dim)
+    config.fc_num_layers = int(fc_num_layers)
     # CNN Config
     config.in_channels = int(in_channels)
     config.conv_hidden_dim=int(conv_hidden_dim)
@@ -212,6 +215,7 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
     config.gabor_gamma=gabor_gamma
     cnn_history_plots=[]
     classical_history_plots=[]
+    cnn_plotted=False
     try:
         dataset = ImageDataset(DATASET_PATH,config.img_size)
         labels = [item['id'] for item in dataset.data]
@@ -226,13 +230,17 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
         cnnmodel = Classifier(cnnbackbone,train_dataset.dataset.classes,config).to(device)
         classicbackbone = ClassicalFeatureExtractor(config)
         classicmodel = Classifier(classicbackbone,train_dataset.dataset.classes,config).to(device)
-        for cnn_text,cnn_fig,classic_text,classic_fig in train(cnnmodel,classicmodel,train_dataset,val_dataset,BATCH_SIZE,LR,EPOCHS,device,visualize_every=vis_every):
+        for cnn_text,cnn_fig,classic_text,classic_fig,cnn_done in train(cnnmodel,classicmodel,train_dataset,val_dataset,BATCH_SIZE,LR,EPOCHS,device,visualize_every=vis_every):
+            if cnn_done and not cnn_plotted:
+                cnn_history_plots.append(plot([cnn_history['train_acc'],cnn_history['val_acc']],['Training Accuracy','Validation Accuracy'],'Epochs','Accuracy (%)','Training vs Validation Accuracy'))
+                cnn_history_plots.append(plot([cnn_history['train_loss'],cnn_history['val_loss']],['Training Loss','Validation Loss'],'Epochs','Loss','Training vs Validation Loss'))
+
             yield cnn_text,cnn_fig,classic_text,classic_fig,cnn_history_plots,classical_history_plots
-        cnn_history_plots.append(plot([cnn_history['train_acc'],cnn_history['val_acc']],['Training Accuracy','Validation Accuracy'],'Epochs','Accuracy (%)','Training vs Validation Accuracy'))
-        cnn_history_plots.append(plot([cnn_history['train_loss'],cnn_history['val_loss']],['Training Loss','Validation Loss'],'Epochs','Loss','Training vs Validation Loss'))
         classical_history_plots.append(plot([classic_history['train_acc'],classic_history['val_acc']],['Training Accuracy','Validation Accuracy'],'Epochs','Accuracy (%)','Training vs Validation Accuracy'))
         classical_history_plots.append(plot([classic_history['train_loss'],classic_history['val_loss']],['Training Loss','Validation Loss'],'Epochs','Loss','Training vs Validation Loss'))
+
         yield cnn_text,cnn_fig,classic_text,classic_fig,cnn_history_plots,classical_history_plots
+
     except RuntimeError as e:
         print(e)
         yield cnn_text,cnn_fig,classic_text,classic_fig,cnn_history_plots,classical_history_plots
@@ -244,6 +252,7 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
         
     cnnmodel.save(os.path.join('trained_model','cnn_model.pt'))
     classicmodel.save(os.path.join('trained_model','classic_model.pt'))
+    
 
 intro_html = """
 <div style="
@@ -305,15 +314,15 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
             seed=gr.Number(value=42,label='Seed',interactive=True,precision=0)
             vis_every=gr.Number(value=5,label='Visualize Validation Every (Epochs)',interactive=True,precision=0)
         with gr.Row():
-            img_width=gr.Number(value=256,label='Image Width',interactive=True,precision=0)
-            img_height=gr.Number(value=256,label='Image Height',interactive=True,precision=0)
-            fc_hidden_dim = gr.Number(value=1,label="Fully Connected Layer Hidden Dim",interactive=True,precision=0)
+            img_width=gr.Number(value=128,label='Image Width',interactive=True,precision=0)
+            img_height=gr.Number(value=128,label='Image Height',interactive=True,precision=0)
+            fc_num_layers = gr.Number(value=3,label="Fully Connected Layer Depth",interactive=True,precision=0)
+            dropout = gr.Slider(minimum=0,maximum=1,value=0.2,step=0.05,label='Fully Connected Layer Dropout',interactive=True)
         gr.Markdown("# CNN Feature Extractor Configuration")
         with gr.Accordion(label="CNN Settings",open=False):
             with gr.Row():
                 in_channels = gr.Number(value=3,label='Input Color Channel Amount',interactive=True,precision=0)
-                conv_hidden_dim = gr.Number(value=6,label='Conv Hidden Dim',interactive=True,precision=0)
-                dropout = gr.Slider(minimum=0,maximum=1,value=0.2,step=0.05,label='Conv Layer Dropout',interactive=True)
+                conv_hidden_dim = gr.Number(value=3,label='Conv Hidden Dim',interactive=True,precision=0)
         gr.Markdown("# Classical Feature Extractor Configuration")
         with gr.Accordion(label='Classical Feature Extractor Settings',open=False):
             with gr.Row():
@@ -366,7 +375,7 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
         stop_btn.click(fn=stop_training, inputs=[], outputs=[])
         train_btn.click(fn=train_model,
                         inputs=[zip_file,batch_size,lr,epochs,seed,vis_every,
-                            img_width,img_height,fc_hidden_dim,
+                            img_width,img_height,fc_num_layers,
                             in_channels,conv_hidden_dim,dropout,
                             classical_downsample,
                             hog_orientations,hog_pixels_per_cell,hog_cells_per_block,hog_block_norm,

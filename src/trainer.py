@@ -9,19 +9,45 @@ import torch
 import random
 import numpy as np
 import torch.nn as nn
+import time
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 class ModelTrainer:
-    def __init__(self,model : Classifier,train_set : ImageDataset,val_set : ImageDataset = None, batch_size=32,lr = 1e-3,device='cpu',return_fig=False):
-        self.train_loader = DataLoader(train_set,batch_size,shuffle=True,collate_fn=collate_fn)
+    def __init__(self,model : Classifier,train_set : ImageDataset,val_set : ImageDataset = None, batch_size=32,lr = 1e-3,device='cpu',return_fig=False, seed=None):
+        g = torch.Generator()
+        if seed is not None:
+            g.manual_seed(seed)
+        
+        self.train_loader = DataLoader(
+            train_set, 
+            batch_size, 
+            shuffle=True, 
+            collate_fn=collate_fn,
+            worker_init_fn=seed_worker,
+            generator=g 
+        )
+        
         self.device = device
+        
         if val_set is not None:
-            self.val_loader = DataLoader(val_set,batch_size,shuffle=False,collate_fn=collate_fn)
+            self.val_loader = DataLoader(
+                val_set, 
+                batch_size, 
+                shuffle=False, 
+                collate_fn=collate_fn,
+                worker_init_fn=seed_worker
+            )
         else:
-            self.val_loader=None
+            self.val_loader = None
         self.class_names = model.classes
         self.model = model
         self.lr = lr
-        self.optim = optim.Adam(model.parameters(),lr=lr)
+        self.optim = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+        self.optim.zero_grad()
         self.criterion = nn.CrossEntropyLoss()
         self.return_fig=return_fig
     
@@ -59,15 +85,19 @@ class ModelTrainer:
         feature_figs = []
 
         for f in raw_features:
-
+            
             if isinstance(f, plt.Figure):
                 feature_figs.append(f)
                 continue
 
             if hasattr(f, "mode"):
                 f = np.array(f)
+            h, w = f.shape[:2]
 
-            fig = plt.figure(figsize=(16, 16))
+            dpi = 100
+            fig_w = max(4, w / dpi)
+            fig_h = max(4, h / dpi)
+            fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
             ax = fig.add_subplot(111)
             ax.imshow(f)
             ax.axis("off")
@@ -75,12 +105,9 @@ class ModelTrainer:
             
 
         all_figs = [fig_pred] + feature_figs
-        plt.show()
-        plt.close(fig_pred)
-        for i,fig in enumerate(feature_figs):
-            plt.figure(fig)
+        if not self.return_fig:
             plt.show()
-            plt.close(fig) 
+        plt.close(fig_pred)
         if self.return_fig:
             return all_figs
         else:
@@ -123,7 +150,7 @@ class ModelTrainer:
             train_losses.append(train_loss)
             train_accuracies.append(train_acc)
             if self.val_loader is not None:
-                val_loss,val_acc,fig=self.validate(epoch, visualize=(epoch % visualize_every == 0))
+                val_loss,val_acc,fig=self.validate(epoch, visualize=(epoch % visualize_every == 0 or epoch == 1))
                 val_losses.append(val_loss)
                 val_accuracies.append(val_acc)
                 print(f"Epoch {epoch} Train Loss: {train_loss:.4f} | Train Acc : {train_acc:.4f} | Val Loss : {val_loss:.4f} | Val Acc : {val_acc:.4f}")
@@ -173,5 +200,4 @@ class ModelTrainer:
         if visualize and val_imgs_display is not None:
             fig = self.visualize_batch(val_imgs_display, val_preds_display, val_labels_display, self.class_names)
 
-        self.model.train()
         return avg_loss,acc,fig

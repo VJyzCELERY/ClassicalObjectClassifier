@@ -13,7 +13,7 @@ from PIL import Image
 class Config:
     img_size=(256,256)
     in_channels=3
-    fc_hidden_dim=3
+    fc_num_layers=3
     conv_hidden_dim=3
     conv_kernel_size=3
     dropout=0.2
@@ -65,11 +65,11 @@ class CNNFeatureExtractor(nn.Module):
         out_channel = 32
         for i in range(config.conv_hidden_dim):
             layers.append(nn.Conv2d(in_channels=in_channel,out_channels=out_channel,kernel_size=config.conv_kernel_size,stride=1,padding=1))
+            layers.append(nn.BatchNorm2d(out_channel))
             layers.append(nn.ReLU())
             layers.append(nn.MaxPool2d(2))
             in_channel=out_channel
             out_channel*=2
-        layers.append(nn.Dropout(config.dropout))
         self.layers = nn.Sequential(*layers)
     def get_device(self):
         return next(self.parameters()).device
@@ -132,7 +132,7 @@ class CNNFeatureExtractor(nn.Module):
             act = activations[0][0]
             num_channels = min(act.shape[0], max_channels)
 
-            fig, axes = plt.subplots(1, num_channels, figsize=(15, 3))
+            fig, axes = plt.subplots(1, num_channels, figsize=(3*num_channels, 3))
             if num_channels == 1:
                 axes = [axes]
 
@@ -307,12 +307,16 @@ class FullyConnectedHead(nn.Module):
         num_classes = len(classes)
         self.classes = classes
         layers = []
-        out_features=512
-        for i in range(config.fc_hidden_dim):
+        out_features=256
+        for i in range(config.fc_num_layers):
             layers.append(nn.Linear(in_features,out_features))
+            layers.append(nn.BatchNorm1d(out_features))
             layers.append(nn.ReLU())
+            layers.append(nn.Dropout(config.dropout))
             in_features=out_features
             out_features=out_features // 2
+            if out_features <= num_classes:
+                break
         layers.append(nn.Linear(in_features,num_classes))
         self.layers = nn.Sequential(*layers)
     def get_device(self):
