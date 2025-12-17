@@ -396,7 +396,7 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
         plt.show()  
 
         return fig 
-    def predict_image(upload,show_original,max_channels):
+    def predict_image(upload,show_original,max_channels,cnn_couple_channel):
         img = cv2.cvtColor(cv2.imread(upload),cv2.COLOR_BGR2RGB)
         model_base_path = "./trained_model"
         classic_model_path =os.path.join(model_base_path,'classic_model.pt')
@@ -412,7 +412,7 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
             return "No CNN Model trained",None,None,None
         cnn_predict = cnn_model.predict(img)
         classic_predict = classic_model.predict(img)
-        cnn_features = cnn_model.visualize_feature(img,max_channels=max_channels)
+        cnn_features = cnn_model.visualize_feature(img,max_channels=max_channels,couple=cnn_couple_channel)
         classical_features = classic_model.visualize_feature(img,show_original=show_original)
         return None,make_figure_from_image(img),cnn_predict,classic_predict,cnn_features,classical_features
     
@@ -423,6 +423,7 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
             gr.Markdown("# CNN Settings")
             with gr.Accordion(open=False):
                 cnn_max_channel_visual = gr.Number(value=8,precision=0,label='Max CNN Channels to Preview',interactive=True)
+                cnn_couple_channel = gr.Checkbox(value=False,label='Couple Channels into RGB')
         with gr.Column():
             gr.Markdown("# Classical Settings")
             with gr.Accordion(open=False):
@@ -439,7 +440,7 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
         
         prediction_btn.click(
             fn=predict_image,
-            inputs=[image_upload,classic_show_original,cnn_max_channel_visual],
+            inputs=[image_upload,classic_show_original,cnn_max_channel_visual,cnn_couple_channel],
             outputs=[verbose,image_preview,cnn_prediction,classical_prediction,cnn_features,classical_features]
         )
         
