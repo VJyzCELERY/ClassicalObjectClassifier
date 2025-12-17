@@ -232,6 +232,7 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
         classicmodel = Classifier(classicbackbone,train_dataset.dataset.classes,config).to(device)
         for cnn_text,cnn_fig,classic_text,classic_fig,cnn_done in train(cnnmodel,classicmodel,train_dataset,val_dataset,BATCH_SIZE,LR,EPOCHS,device,visualize_every=vis_every):
             if cnn_done and not cnn_plotted:
+                cnn_plotted=True
                 cnn_history_plots.append(plot([cnn_history['train_acc'],cnn_history['val_acc']],['Training Accuracy','Validation Accuracy'],'Epochs','Accuracy (%)','Training vs Validation Accuracy'))
                 cnn_history_plots.append(plot([cnn_history['train_loss'],cnn_history['val_loss']],['Training Loss','Validation Loss'],'Epochs','Loss','Training vs Validation Loss'))
 
