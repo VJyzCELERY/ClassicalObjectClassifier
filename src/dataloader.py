@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset
+from torch.utils.data import Subset,Dataset
 import torch
 import os
 import numpy as np
@@ -37,4 +37,25 @@ class ImageDataset(Dataset):
         img = img.astype(np.float32) / 255.0
         return img,label
 
+def simple_augment(img):
+    if np.random.rand() > 0.5:
+        img = cv2.flip(img, 1)
 
+    angle = np.random.uniform(-15, 15)
+    h, w = img.shape[:2]
+    M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+    img = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+
+    return img
+
+
+class AugmentedSubset(Subset):
+    def __init__(self, subset, augment_fn=None):
+        super().__init__(subset.dataset, subset.indices)
+        self.augment_fn = augment_fn
+
+    def __getitem__(self, idx):
+        img, label = super().__getitem__(idx)
+        if self.augment_fn:
+            img = self.augment_fn(img)
+        return img, label

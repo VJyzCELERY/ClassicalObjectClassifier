@@ -2,10 +2,10 @@ import gradio as gr
 import zipfile
 import os
 import torch
-from src.dataloader import ImageDataset,collate_fn
+from src.dataloader import ImageDataset,collate_fn,AugmentedSubset,simple_augment
 from src.model import Classifier,Config,CNNFeatureExtractor,ClassicalFeatureExtractor,load
 from torch.utils.data import Subset
-from src.trainer import ModelTrainer
+from src.trainer import ModelTrainer,model_evaluation
 import torch
 import os
 import numpy as np
@@ -17,9 +17,6 @@ import matplotlib.pyplot as plt
 import shutil
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.metrics import classification_report
-from torch.utils.data import DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def unzip_dataset(zip_file):
@@ -82,13 +79,22 @@ def plot(datas, labels, xlabel, ylabel, title, figsize=(16, 8)):
 
 class TrainingInterrupted(Exception):
     pass
+cnntrainer=None
+classictrainer=None
 def stop_training():
     global training_interrupt
     training_interrupt = True
+    if cnntrainer is not None:
+        cnntrainer.interrupt=True
+    if classictrainer is not None:
+        classictrainer.interrupt=True
     return "Training stopped."
+
+
 
 def train(cnn,classic,train_set,val_set,batch_size,lr,epochs,device="cpu",visualize_every=5):
     global training_interrupt
+    global cnntrainer,classictrainer
     training_interrupt = False
     global cnn_history
     global classic_history
@@ -163,17 +169,17 @@ def train(cnn,classic,train_set,val_set,batch_size,lr,epochs,device="cpu",visual
         print(e)
         return
 
-def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
+def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,use_augment,
                 img_width,img_height,fc_num_layers,
                 in_channels,conv_hidden_dim,dropout,
                 classical_downsample,
-                hog_orientations,hog_pixels_per_cell,hog_cells_per_block,hog_block_norm,
+                # hog_orientations,hog_pixels_per_cell,hog_cells_per_block,hog_block_norm,
                 canny_sigma,canny_low,canny_high,
                 gaussian_ksize,gaussian_sigmaX,gaussian_sigmaY,
                 harris_block_size,harris_ksize,harris_k,
-                shi_max_corners,shi_quality_level,shi_min_distance,
                 lbp_P,lbp_R,
-                gabor_ksize,gabor_sigma,gabor_theta,gabor_lambda,gabor_gamma):
+                gabor_ksize,gabor_sigma,gabor_theta,gabor_lambda,gabor_gamma,
+                sobel_ksize):
     config = Config()
     global training_interrupt
     training_interrupt = False
@@ -190,10 +196,10 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
     config.dropout=dropout
     # Classical Config
     config.classical_downsample=int(classical_downsample)
-    config.hog_orientations=int(hog_orientations)
-    config.hog_pixels_per_cell=(int(hog_pixels_per_cell),int(hog_pixels_per_cell))
-    config.hog_cells_per_block=(int(hog_cells_per_block),int(hog_cells_per_block))
-    config.hog_block_norm=hog_block_norm
+    # config.hog_orientations=int(hog_orientations)
+    # config.hog_pixels_per_cell=(int(hog_pixels_per_cell),int(hog_pixels_per_cell))
+    # config.hog_cells_per_block=(int(hog_cells_per_block),int(hog_cells_per_block))
+    # config.hog_block_norm=hog_block_norm
     config.canny_sigma=int(canny_sigma)
     config.canny_low=canny_low
     config.canny_high=canny_high
@@ -203,9 +209,6 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
     config.harris_block_size=int(harris_block_size)
     config.harris_ksize=int(harris_ksize)
     config.harris_k=harris_k
-    config.shi_max_corners=int(shi_max_corners)
-    config.shi_quality_level=shi_quality_level
-    config.shi_min_distance=int(shi_min_distance)
     config.lbp_P=int(lbp_P)
     config.lbp_R=int(lbp_R)
     config.gabor_ksize=int(gabor_ksize)
@@ -213,12 +216,14 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
     config.gabor_theta=int(gabor_theta)
     config.gabor_lambda=int(gabor_lambda)
     config.gabor_gamma=gabor_gamma
+    config.sobel_ksize=int(sobel_ksize)
     cnn_history_plots=[]
     classical_history_plots=[]
     cnn_plotted=False
     try:
         dataset = ImageDataset(DATASET_PATH,config.img_size)
         labels = [item['id'] for item in dataset.data]
+        classes_name = dataset.classes
         train_idx, validation_idx = train_test_split(np.arange(len(dataset)),
                                                 test_size=0.2,
                                                 random_state=SEED,
@@ -226,6 +231,12 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
                                                 stratify=labels)
         train_dataset = Subset(dataset, train_idx)
         val_dataset = Subset(dataset, validation_idx)
+        if use_augment:
+            train_dataset = AugmentedSubset(train_dataset,simple_augment)
+            val_dataset = AugmentedSubset(val_dataset,None)
+        else:
+            train_dataset = AugmentedSubset(train_dataset,None)
+            val_dataset = AugmentedSubset(val_dataset,None)
         cnnbackbone = CNNFeatureExtractor(config).to(device)
         cnnmodel = Classifier(cnnbackbone,train_dataset.dataset.classes,config).to(device)
         classicbackbone = ClassicalFeatureExtractor(config)
@@ -235,11 +246,17 @@ def train_model(zip_file,batch_size,lr,epochs,seed,vis_every,
                 cnn_plotted=True
                 cnn_history_plots.append(plot([cnn_history['train_acc'],cnn_history['val_acc']],['Training Accuracy','Validation Accuracy'],'Epochs','Accuracy (%)','Training vs Validation Accuracy'))
                 cnn_history_plots.append(plot([cnn_history['train_loss'],cnn_history['val_loss']],['Training Loss','Validation Loss'],'Epochs','Loss','Training vs Validation Loss'))
-
+                cm,cr,roc = model_evaluation(cnnmodel,val_dataset,device,BATCH_SIZE,0,classes_name)
+                cnn_history_plots.append(fig_to_image(cm))
+                cnn_history_plots.append(fig_to_image(cr))
+                cnn_history_plots.append(fig_to_image(roc))
             yield cnn_text,cnn_fig,classic_text,classic_fig,cnn_history_plots,classical_history_plots
         classical_history_plots.append(plot([classic_history['train_acc'],classic_history['val_acc']],['Training Accuracy','Validation Accuracy'],'Epochs','Accuracy (%)','Training vs Validation Accuracy'))
         classical_history_plots.append(plot([classic_history['train_loss'],classic_history['val_loss']],['Training Loss','Validation Loss'],'Epochs','Loss','Training vs Validation Loss'))
-
+        cm,cr,roc = model_evaluation(classicmodel,val_dataset,device,BATCH_SIZE,0,classes_name)
+        classical_history_plots.append(fig_to_image(cm))
+        classical_history_plots.append(fig_to_image(cr))
+        classical_history_plots.append(fig_to_image(roc))
         yield cnn_text,cnn_fig,classic_text,classic_fig,cnn_history_plots,classical_history_plots
 
     except RuntimeError as e:
@@ -314,6 +331,7 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
             epochs= gr.Number(value=20,label="Epochs",interactive=True,precision=0)
             seed=gr.Number(value=42,label='Seed',interactive=True,precision=0)
             vis_every=gr.Number(value=5,label='Visualize Validation Every (Epochs)',interactive=True,precision=0)
+            use_augment = gr.Checkbox(value=True,label='Use data augmentation for train data')
         with gr.Row():
             img_width=gr.Number(value=128,label='Image Width',interactive=True,precision=0)
             img_height=gr.Number(value=128,label='Image Height',interactive=True,precision=0)
@@ -328,11 +346,12 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
         with gr.Accordion(label='Classical Feature Extractor Settings',open=False):
             with gr.Row():
                 classical_downsample = gr.Number(value=1,label='Classical Extractor Downsampling Amount',interactive=True,precision=0)
-            with gr.Row():
-                hog_orientations = gr.Number(value=9,label='HoG Orientations',interactive=True,precision=0)
-                hog_pixels_per_cell = gr.Number(value=16,label='HoG pixels per cell',interactive=True,precision=0)
-                hog_cells_per_block = gr.Number(value=2,label='HoG cells per block',interactive=True,precision=0)
-                hog_block_norm = gr.Dropdown(['L2-Hys'],value='L2-Hys',label='HoG Block Normalization Method',interactive=True)
+            # Deprecated
+            # with gr.Row():
+            #     hog_orientations = gr.Number(value=9,label='HoG Orientations',interactive=True,precision=0)
+            #     hog_pixels_per_cell = gr.Number(value=16,label='HoG pixels per cell',interactive=True,precision=0)
+            #     hog_cells_per_block = gr.Number(value=2,label='HoG cells per block',interactive=True,precision=0)
+            #     hog_block_norm = gr.Dropdown(['L2-Hys'],value='L2-Hys',label='HoG Block Normalization Method',interactive=True)
             with gr.Row():
                 canny_sigma = gr.Number(value=1.0,label='Canny Sigma Value',interactive=True)
                 canny_low = gr.Number(value=100,label='Canny Low Threshold',interactive=True,precision=0)
@@ -346,18 +365,16 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
                 harris_ksize = gr.Number(value=3,label='Harris Corner Kernel Size',interactive=True,precision=0)
                 harris_k = gr.Slider(minimum=0.01, maximum=0.1, value=0.04, step=0.005, label='Harris Corner K value',interactive=True)
             with gr.Row():
-                shi_max_corners = gr.Number(value=100,label='Shi-Tomasi Max Corners',interactive=True,precision=0)
-                shi_quality_level = gr.Number(value=0.01,label='Shi-Tomasi Quality Level',interactive=True)
-                shi_min_distance = gr.Number(value=10,label='Shi-Tomasi Min Distance',interactive=True,precision=0)
-            with gr.Row():
                 lbp_P = gr.Number(value=8,label='LBP P Value',interactive=True,precision=0)
                 lbp_R = gr.Number(value=1,label='LBP R Value',interactive=True,precision=0)
             with gr.Row():
                 gabor_ksize  = gr.Number(value=21,label="Gabor Kernel Size",interactive=True,precision=0)
                 gabor_sigma  = gr.Number(value=5,label="Gabor Sigma",interactive=True,precision=0)
-                gabor_theta  = gr.Number(value=0,label="Gabor Theta",interactive=True,precision=0)
+                gabor_theta  = gr.Number(value=0,label="Gabor Theta",interactive=True,precision=0,info="This current does nothing")
                 gabor_lambda = gr.Number(value=10,label="Gabor Lambda",interactive=True,precision=0)
                 gabor_gamma  = gr.Number(value=0.5,label="Gabor Gamma",interactive=True)
+            with gr.Row():
+                sobel_ksize = gr.Number(value=3,label="Sobel Kernel Size",interactive=True,precision=0)
         with gr.Column():
             train_btn = gr.Button("Train Model",variant='secondary',interactive=True)
             stop_btn = gr.Button("Stop Training")
@@ -375,17 +392,17 @@ with gr.Blocks(title="Object Classifier Playground") as demo:
                 classical_plots = gr.Gallery(label="CNN Training Performance",interactive=False,object_fit='fill',columns=1)
         stop_btn.click(fn=stop_training, inputs=[], outputs=[])
         train_btn.click(fn=train_model,
-                        inputs=[zip_file,batch_size,lr,epochs,seed,vis_every,
+                        inputs=[zip_file,batch_size,lr,epochs,seed,vis_every,use_augment,
                             img_width,img_height,fc_num_layers,
                             in_channels,conv_hidden_dim,dropout,
                             classical_downsample,
-                            hog_orientations,hog_pixels_per_cell,hog_cells_per_block,hog_block_norm,
+                            # hog_orientations,hog_pixels_per_cell,hog_cells_per_block,hog_block_norm,
                             canny_sigma,canny_low,canny_high,
                             gaussian_ksize,gaussian_sigmaX,gaussian_sigmaY,
                             harris_block_size,harris_ksize,harris_k,
-                            shi_max_corners,shi_quality_level,shi_min_distance,
                             lbp_P,lbp_R,
-                            gabor_ksize,gabor_sigma,gabor_theta,gabor_lambda,gabor_gamma],
+                            gabor_ksize,gabor_sigma,gabor_theta,gabor_lambda,gabor_gamma,
+                            sobel_ksize],
                         outputs=[cnn_log,cnn_fig,classical_log,classical_fig,cnn_plots,classical_plots]
                         )
     def make_figure_from_image(img):

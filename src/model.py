@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from skimage.feature import hog,local_binary_pattern
+import itertools
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import os
 import io
@@ -14,7 +16,7 @@ class Config:
     img_size=(256,256)
     in_channels=3
     fc_num_layers=3
-    conv_hidden_dim=3
+    conv_hidden_dim=2
     conv_kernel_size=3
     dropout=0.2
     classical_downsample=1
@@ -39,10 +41,6 @@ class Config:
     harris_ksize = 3
     harris_k = 0.04
 
-    # Shi-Tomasi corners
-    shi_max_corners = 100
-    shi_quality_level = 0.01
-    shi_min_distance = 10
 
     # LBP
     lbp_P = 8 
@@ -58,6 +56,7 @@ class Config:
     # Sobel
     sobel_ksize=3
 
+
 class CNNFeatureExtractor(nn.Module):
     def __init__(self,config : Config):
         super().__init__()
@@ -67,16 +66,16 @@ class CNNFeatureExtractor(nn.Module):
         self.img_size = config.img_size
         out_channel = 32
         for i in range(config.conv_hidden_dim):
-            layers.append(nn.Conv2d(in_channels=in_channel,out_channels=out_channel,kernel_size=config.conv_kernel_size,stride=1,padding=1))
+            layers.append(nn.Conv2d(in_channels=in_channel,out_channels=out_channel,kernel_size=config.conv_kernel_size,stride=1,padding=config.conv_kernel_size // 2))
             layers.append(nn.BatchNorm2d(out_channel))
             layers.append(nn.ReLU())
-            layers.append(nn.MaxPool2d(2))
+            layers.append(nn.MaxPool2d((2,2)))
             in_channel=out_channel
             out_channel*=2
         self.layers = nn.Sequential(*layers)
     def get_device(self):
         return next(self.parameters()).device
-    def forward(self,x):
+    def forward(self,x,**kwargs):
         if isinstance(x, list):
             if isinstance(x[0], np.ndarray):
                 x = np.stack(x, axis=0) 
@@ -129,7 +128,7 @@ class CNNFeatureExtractor(nn.Module):
         conv_layers = [
             (name, module)
             for name, module in self.named_modules()
-            if isinstance(module, nn.Conv2d)
+            if isinstance(module, nn.ReLU)
         ]
 
         all_layer_images = []
@@ -251,7 +250,7 @@ class CNNFeatureExtractor(nn.Module):
             plt.close(fig)
 
         return all_layer_images
-    
+
 class ClassicalFeatureExtractor(nn.Module):
     def __init__(self, config : Config):
         super().__init__()
@@ -260,128 +259,103 @@ class ClassicalFeatureExtractor(nn.Module):
         self.num_downsample = config.classical_downsample
         self.config = config
         self.device = 'cpu'
-
+        self.convolution=None
+    
     def get_device(self):
         return next(self.parameters()).device if len(list(self.parameters())) > 0 else self.device
 
+    def render_subplots(self,items, max_cols=8, figsize_per_cell=3):
+        n = len(items)
+        cols = min(max_cols, n)
+        rows = int(np.ceil(n / cols))
+        fig, axes = plt.subplots(
+            rows, cols,
+            figsize=(cols * figsize_per_cell, rows * figsize_per_cell)
+        )
+        axes = np.atleast_2d(axes)
+        for idx, (img, title, cmap) in enumerate(items):
+            r = idx // cols
+            c = idx % cols
+            ax = axes[r, c]
+            ax.imshow(img, cmap=cmap)
+            ax.set_title(title, fontsize=9)
+            ax.axis("off")
+        for idx in range(n, rows * cols):
+            r = idx // cols
+            c = idx % cols
+            axes[r, c].axis("off")
 
+        plt.tight_layout()
+        return fig
+    
     def extract_features(self, img,visualize=False,**kwargs):
         cfg = self.config
-
         # Convert to grayscale
         gray = cv2.cvtColor((img*255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-
         for _ in range(self.num_downsample):
             gray = cv2.pyrDown(gray)
-
         gray = cv2.GaussianBlur(gray, cfg.gaussian_ksize, sigmaX=cfg.gaussian_sigmaX, sigmaY=cfg.gaussian_sigmaY)
         valid_H, valid_W = gray.shape[:2]
         
-        def render_subplots(items, max_cols=8, figsize_per_cell=3):
-            n = len(items)
-            cols = min(max_cols, n)
-            rows = int(np.ceil(n / cols))
-
-            fig, axes = plt.subplots(
-                rows, cols,
-                figsize=(cols * figsize_per_cell, rows * figsize_per_cell)
-            )
-
-            axes = np.atleast_2d(axes)
-
-            for idx, (img, title, cmap) in enumerate(items):
-                r = idx // cols
-                c = idx % cols
-                ax = axes[r, c]
-                ax.imshow(img, cmap=cmap)
-                ax.set_title(title, fontsize=9)
-                ax.axis("off")
-
-            # Hide unused axes
-            for idx in range(n, rows * cols):
-                r = idx // cols
-                c = idx % cols
-                axes[r, c].axis("off")
-
-            plt.tight_layout()
-            return fig
 
         feature_list = []
         vis_items=[]
-        # figs = []
-        H, W = gray.shape
-        cell_h, cell_w = cfg.hog_pixels_per_cell
-        block_h, block_w = cfg.hog_cells_per_block
+        # DEPRECATED
+        # H, W = gray.shape
+        # cell_h, cell_w = cfg.hog_pixels_per_cell
+        # block_h, block_w = cfg.hog_cells_per_block
 
-        min_h = cell_h * block_h
-        min_w = cell_w * block_w
-        use_hog = (H > 2*min_h) and (W > 2*min_w)
-        # 1. HOG
-        if use_hog:
-            hog_descriptors, hog_image = hog(
-                gray,
-                orientations=cfg.hog_orientations,
-                pixels_per_cell=cfg.hog_pixels_per_cell,
-                cells_per_block=cfg.hog_cells_per_block,
-                block_norm=cfg.hog_block_norm,
-                visualize=True,
-                feature_vector=False
-            )
+        # min_h = cell_h * block_h
+        # min_w = cell_w * block_w
+        # use_hog = False
+        # # 1. HOG
+        # if use_hog:
+        #     hog_descriptors, hog_image = hog(
+        #         gray,
+        #         orientations=cfg.hog_orientations,
+        #         pixels_per_cell=cfg.hog_pixels_per_cell,
+        #         cells_per_block=cfg.hog_cells_per_block,
+        #         block_norm=cfg.hog_block_norm,
+        #         visualize=True,
+        #         feature_vector=False
+        #     )
 
-            hog_cells = hog_descriptors.mean(axis=(2, 3))
+        #     hog_cells = hog_descriptors.mean(axis=(2, 3))
             
-            cell_h, cell_w = cfg.hog_pixels_per_cell
-            hog_pixel = np.repeat(
-                np.repeat(hog_cells, cell_h, axis=0),
-                cell_w, axis=1
-            )
-            hog_pixel = hog_pixel[:gray.shape[0], :gray.shape[1]]
-            hog_energy = np.sum(hog_pixel, axis=2)
-            dominant_bin = np.argmax(hog_pixel, axis=2)
-            dominant_strength = np.max(hog_pixel, axis=2)
-            dominant_weighted = dominant_bin * dominant_strength
-            valid_H, valid_W = hog_pixel.shape[:2]
-            if visualize:
-                # figs.append(plot_feature(hog_energy, "HOG Energy"))
-                # figs.append(plot_feature(dominant_bin, "HOG Dominant Bin",cmap='hsv'))
-                # figs.append(plot_feature(dominant_weighted, "HOG Weighted Dominant Bin"))
-                # figs.append(plot_feature(hog_image[:valid_H, :valid_W], f"HoG"))
-                vis_items.append((hog_energy, "HOG Energy",'gray'))
-                vis_items.append((dominant_bin, "HOG Dominant Bin",'hsv'))
-                vis_items.append((dominant_weighted, "HOG Weighted Dominant Bin",'gray'))
-                vis_items.append((hog_image[:valid_H, :valid_W], f"HoG",'gray'))
-            for b in range(hog_pixel.shape[2]):
-                feature_list.append(hog_pixel[:, :, b])
+        #     cell_h, cell_w = cfg.hog_pixels_per_cell
+        #     hog_pixel = np.repeat(
+        #         np.repeat(hog_cells, cell_h, axis=0),
+        #         cell_w, axis=1
+        #     )
+        #     hog_pixel = hog_pixel[:gray.shape[0], :gray.shape[1]]
+        #     hog_energy = np.sum(hog_pixel, axis=2)
+        #     dominant_bin = np.argmax(hog_pixel, axis=2)
+        #     dominant_strength = np.max(hog_pixel, axis=2)
+        #     dominant_weighted = dominant_bin * dominant_strength
+        #     valid_H, valid_W = hog_pixel.shape[:2]
+        #     if visualize:
+        #         vis_items.append((hog_energy, "HOG Energy",'gray'))
+        #         vis_items.append((dominant_bin, "HOG Dominant Bin",'hsv'))
+        #         vis_items.append((dominant_weighted, "HOG Weighted Dominant Bin",'gray'))
+        #         vis_items.append((hog_image[:valid_H, :valid_W], f"HoG",'gray'))
+        #     for b in range(hog_pixel.shape[2]):
+        #         feature_list.append(hog_pixel[:, :, b])
         
         
         # 2. Canny edges
         edges = cv2.Canny(gray, cfg.canny_low, cfg.canny_high) / 255.0
-        # feature_list.append(edges.ravel())
         feature_list.append(edges[:valid_H, :valid_W])
         if visualize:
-            # figs.append(plot_feature(edges[:valid_H, :valid_W], "Canny Edge"))
             vis_items.append((edges[:valid_H, :valid_W], "Canny Edge", "gray"))
         # 3. Harris corners
         harris = cv2.cornerHarris(gray, blockSize=cfg.harris_block_size, ksize=cfg.harris_ksize, k=cfg.harris_k)
         harris = cv2.dilate(harris, None)
         harris = np.clip(harris, 0, 1)
-        # feature_list.append(harris.ravel())
         feature_list.append(harris[:valid_H, :valid_W])
         if visualize:
-            # figs.append(plot_feature(harris[:valid_H, :valid_W], "Harris Corner"))
             vis_items.append((harris[:valid_H, :valid_W], "Harris Corner", "gray"))
-        # # 4. Shi-Tomasi corners
-        # shi_corners = np.zeros_like(gray, dtype=np.float32)
-        # keypoints = cv2.goodFeaturesToTrack(gray, maxCorners=cfg.shi_max_corners, qualityLevel=cfg.shi_quality_level, minDistance=cfg.shi_min_distance)
-        # if keypoints is not None:
-        #     for kp in keypoints:
-        #         x, y = kp.ravel()
-        #         shi_corners[int(y), int(x)] = 1.0
-        # # feature_list.append(shi_corners.ravel())
-        # feature_list.append(shi_corners[:valid_H, :valid_W])
-        # if visualize:
-        #     figs.append(plot_feature(shi_corners[:valid_H, :valid_W], "Shi-Tomasi Corner"))
-        # 5. LBP
+
+        # 4. LBP
         lbp = local_binary_pattern(gray, P=cfg.lbp_P, R=cfg.lbp_R, method='uniform')
         lbp = lbp / lbp.max() if lbp.max() != 0 else lbp
         # feature_list.append(lbp.ravel())
@@ -389,15 +363,7 @@ class ClassicalFeatureExtractor(nn.Module):
         if visualize:
             # figs.append(plot_feature(lbp[:valid_H, :valid_W], "LBP"))
             vis_items.append((lbp[:valid_H, :valid_W], "LBP", "gray"))
-        # 6. Gabor filter
-        # g_kernel = cv2.getGaborKernel((cfg.gabor_ksize, cfg.gabor_ksize), cfg.gabor_sigma, cfg.gabor_theta, cfg.gabor_lambda, cfg.gabor_gamma)
-        # gabor_feat = cv2.filter2D(gray, cv2.CV_32F, g_kernel)
-        # gabor_feat = (gabor_feat - gabor_feat.min()) / (gabor_feat.max() - gabor_feat.min() + 1e-8)
-        # # feature_list.append(gabor_feat.ravel())
-        # feature_list.append(gabor_feat[:valid_H, :valid_W])
-        # if visualize:
-        #     figs.append(plot_feature(gabor_feat[:valid_H, :valid_W], "Gabor Filter"))
-
+        # 5. Gabor filter
         for theta in [0, np.pi/4, np.pi/2]:
             kernel = cv2.getGaborKernel(
                 (cfg.gabor_ksize, cfg.gabor_ksize),
@@ -409,9 +375,8 @@ class ClassicalFeatureExtractor(nn.Module):
             g /= g.max() + 1e-8
             feature_list.append(g[:valid_H, :valid_W])
             if visualize:
-                # figs.append(plot_feature(g[:valid_H, :valid_W], "Gabor Filter"))
                 vis_items.append((g[:valid_H, :valid_W], f"Gabor θ={theta:.2f}", "gray"))
-        # 7. Sobel
+        # 6. Sobel
         sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=cfg.sobel_ksize)
         sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=cfg.sobel_ksize)
 
@@ -424,11 +389,9 @@ class ClassicalFeatureExtractor(nn.Module):
         feature_list.append(sobelx[:valid_H, :valid_W])
         feature_list.append(sobely[:valid_H, :valid_W])
         if visualize:
-            # figs.append(plot_feature(sobelx[:valid_H, :valid_W], "Sobel X"))
-            # figs.append(plot_feature(sobely[:valid_H, :valid_W], "Sobel Y"))
             vis_items.append((sobelx[:valid_H, :valid_W], "Sobel X",'gray'))
             vis_items.append((sobely[:valid_H, :valid_W], "Sobel Y",'gray'))
-        # 8. Laplacian
+        # 7. Laplacian
         lap = cv2.Laplacian(gray, cv2.CV_32F)
         lap = np.abs(lap)
         lap /= lap.max() + 1e-8
@@ -436,10 +399,9 @@ class ClassicalFeatureExtractor(nn.Module):
         feature_list.append(lap[:valid_H, :valid_W])
 
         if visualize:
-            # figs.append(plot_feature(lap[:valid_H, :valid_W], "Laplacian"))
             vis_items.append((lap[:valid_H, :valid_W], "Laplacian",'gray'))
 
-        # 9. Gradient Magnitude
+        # 8. Gradient Magnitude
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=cfg.sobel_ksize)
         gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=cfg.sobel_ksize)
 
@@ -449,37 +411,38 @@ class ClassicalFeatureExtractor(nn.Module):
         feature_list.append(grad_mag[:valid_H, :valid_W])
 
         if visualize:
-            # figs.append(plot_feature(grad_mag[:valid_H, :valid_W], "Gradient Magnitude"))
             vis_items.append((grad_mag[:valid_H, :valid_W], "Gradient Magnitude",'gray'))
 
         # Stack all features along channel axis
         features = np.stack(feature_list, axis=0)
-        # features = np.concatenate(feature_list).astype(np.float32)
         if visualize:
-            return features.astype(np.float32),[render_subplots(vis_items, max_cols=8)]
+            return features.astype(np.float32),[self.render_subplots(vis_items, max_cols=8)]
         return features.astype(np.float32)
 
 
-    def forward(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.cpu().numpy()
-        if isinstance(x, np.ndarray):
-            if x.ndim == 3:
-                x = np.expand_dims(x, 0)
-            elif x.ndim != 4:
-                raise ValueError(f"Expected input of shape HWC or BHWC, got {x.shape}")
-        elif isinstance(x, list):
+    def forward(self, x, **kwargs):
+        if isinstance(x, list):
             x = np.stack(x, axis=0)
 
-        batch_features = []
+        if isinstance(x, torch.Tensor):
+            x = x.cpu().numpy()
+
+        if isinstance(x, np.ndarray):
+            if x.ndim == 3:         
+                x = x[None]
+            elif x.ndim != 4:
+                raise ValueError(
+                    f"Expected input of shape HWC or BHWC, got {x.shape}"
+                )
+        feats = []
         for img in x:
-            if img.ndim != 3 or img.shape[2] != 3:
+            if img.shape[2] != 3:
                 img = np.repeat(img[:, :, None], 3, axis=2)
-            feat = self.extract_features(img)
-            batch_features.append(feat)
-        batch_features = np.stack(batch_features, axis=0)
-        batch_features = torch.from_numpy(batch_features).float().to(self.get_device())
-        return batch_features
+            feats.append(self.extract_features(img))
+
+        feats = np.stack(feats, axis=0)
+        feats = torch.from_numpy(feats).float().to(self.get_device())
+        return feats
     
     def visualize(self, img, show_original=True,show=True):
         if img.ndim != 3 or img.shape[2] != 3:
@@ -517,10 +480,14 @@ class ClassicalFeatureExtractor(nn.Module):
 
 
     def output(self):
-        """Return dummy output to compute in_features for FC head"""
-        dummy_img = np.zeros((1, self.img_size[1],self.img_size[0], 3), dtype=np.float32)
-        feat = self.forward(dummy_img)
-        return feat
+        dummy = np.zeros(
+            (self.img_size[1], self.img_size[0], 3),
+            dtype=np.float32
+        )
+
+        feats = self.forward(dummy)
+
+        return feats
 
 
 
@@ -530,21 +497,20 @@ class FullyConnectedHead(nn.Module):
         num_classes = len(classes)
         self.classes = classes
         layers = []
-        out_features=256
-        for i in range(config.fc_num_layers):
-            layers.append(nn.Linear(in_features,out_features))
-            layers.append(nn.BatchNorm1d(out_features))
+        hidden_dim =1024
+        for _ in range(config.fc_num_layers):
+            layers.append(nn.Linear(in_features, hidden_dim))
+            layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(config.dropout))
-            in_features=out_features
-            out_features=out_features // 2
-            if out_features <= num_classes:
-                break
+
+            in_features = hidden_dim
+            hidden_dim = max(hidden_dim // 2, num_classes * 2)
         layers.append(nn.Linear(in_features,num_classes))
         self.layers = nn.Sequential(*layers)
     def get_device(self):
         return next(self.parameters()).device
-    def forward(self,x : torch.Tensor):
+    def forward(self,x : torch.Tensor,**kwargs):
         x=x.to(self.get_device())
         return self.layers(x)
     
@@ -568,15 +534,15 @@ class Classifier(nn.Module):
         target_size = self.config.img_size
         x = cv2.resize(x, target_size)
         logits = self.forward(x)    
-        probs = torch.softmax(logits, dim=1)
+        probs = torch.softmax(logits,dim=1)
         pred_idx = torch.argmax(probs, dim=1).item()
 
         return self.classes[pred_idx]
 
-    def forward(self,x):
-        feat = self.backbone(x)
-        feat = self.flatten(feat)
-        return self.head(feat)
+    def forward(self,x,**kwargs):
+        feat = self.backbone(x,**kwargs)
+        feat = self.flatten(feat,**kwargs)
+        return self.head(feat,**kwargs)
     def visualize_feature(self,img,return_img=True,**kwargs):
         target_size = self.config.img_size
         img = cv2.resize(img, target_size)
