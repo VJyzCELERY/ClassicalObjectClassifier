@@ -37,14 +37,50 @@ class ImageDataset(Dataset):
         img = img.astype(np.float32) / 255.0
         return img,label
 
-def simple_augment(img):
-    if np.random.rand() > 0.5:
+def apply_clahe(img, clip_limit=2.0, tile_grid_size=(8, 8)):
+    clahe = cv2.createCLAHE(
+        clipLimit=clip_limit,
+        tileGridSize=tile_grid_size
+    )
+
+    if len(img.shape) == 2:
+        return clahe.apply(img)
+
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+def apply_hist_equalization(img):
+    if len(img.shape) == 2:
+        return cv2.equalizeHist(img)
+
+    ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+    ycrcb[:, :, 0] = cv2.equalizeHist(ycrcb[:, :, 0])
+    return cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+
+def simple_augment(img,
+                   p_flip=0.5,
+                   p_rotate=1.0,
+                   p_he=0.3,
+                   p_clahe=0.3):
+
+    if np.random.rand() < p_flip:
         img = cv2.flip(img, 1)
 
-    angle = np.random.uniform(-15, 15)
-    h, w = img.shape[:2]
-    M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
-    img = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+    if np.random.rand() < p_rotate:
+        angle = np.random.uniform(-15, 15)
+        h, w = img.shape[:2]
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        img = cv2.warpAffine(
+            img, M, (w, h),
+            borderMode=cv2.BORDER_REFLECT
+        )
+
+    if np.random.rand() < p_he:
+        img = apply_hist_equalization(img)
+
+    if np.random.rand() < p_clahe:
+        img = apply_clahe(img)
 
     return img
 

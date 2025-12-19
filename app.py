@@ -298,7 +298,7 @@ intro_html = """
     </p>
     <img src="https://raw.githubusercontent.com/VJyzCELERY/ClassicalObjectClassifier/refs/heads/main/assets/conv-illus.jpg"></img>
     <p>
-    For more detail on how convolutional neural network work, you can refer to this <a href="https://viso.ai/deep-learning/convolution-operations/">link</a>.
+    For more detail on how convolutional neural network work, you can refer to this https://viso.ai/deep-learning/convolution-operations/.
     </p>
     <p>
     In reality, what this convolution operation does is extract features to be processed on for a machine learning or another deep learning model. The Convolution by itself does not result in an object classification directly. So even deep learning model such as CNN

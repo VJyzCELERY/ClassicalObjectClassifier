@@ -18,6 +18,7 @@ class Config:
     fc_num_layers=3
     conv_hidden_dim=2
     conv_kernel_size=3
+    conv_initial_out_channel=32
     dropout=0.2
     classical_downsample=1
     # HOG
@@ -61,10 +62,11 @@ class CNNFeatureExtractor(nn.Module):
     def __init__(self,config : Config):
         super().__init__()
         layers = []
+        self.config = config
         self.in_channels = config.in_channels
         in_channel = config.in_channels
         self.img_size = config.img_size
-        out_channel = 32
+        out_channel = config.conv_initial_out_channel
         for i in range(config.conv_hidden_dim):
             layers.append(nn.Conv2d(in_channels=in_channel,out_channels=out_channel,kernel_size=config.conv_kernel_size,stride=1,padding=config.conv_kernel_size // 2))
             layers.append(nn.BatchNorm2d(out_channel))
@@ -110,7 +112,7 @@ class CNNFeatureExtractor(nn.Module):
     def visualize(
         self,
         input_image,
-        max_channels=8,
+        max_channels=10,
         couple=False,
         show=True,
         **kwargs

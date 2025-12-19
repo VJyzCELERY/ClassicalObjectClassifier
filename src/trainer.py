@@ -32,13 +32,11 @@ def model_evaluation(model, val_set, device,batch_size=32,num_workers=0, class_n
         val_set,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers
+        num_workers=num_workers,
+        collate_fn=collate_fn
     )
     with torch.no_grad():
         for images, labels in val_loader:
-            if images.ndim == 4 and images.shape[-1] in (1, 3):
-                images = images.permute(0, 3, 1, 2)
-            images = images.to(device)
             labels = labels.to(device)
             logits = model(images)
             probs = torch.softmax(logits, dim=1)
